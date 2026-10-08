@@ -1,6 +1,9 @@
 import { render } from "preact";
 import { useEffect, useRef, useState, useMemo } from "preact/hooks";
 import "./style.css";
+import { messageDate, groupedMessage } from "./messages.js";
+import { mentionSuggestions, mentionedText } from "./interactions.js";
+import { notifyMentions } from "./notifications.js";
 import { ingest, timeline, suggestions, privatePeers, privateMessages, redactCommand, helpSections } from "./console.js";
 
 if (import.meta.env.PROD && location.protocol !== "https:") {
@@ -138,8 +141,36 @@ function Chat({ initial, onLogout }) {
       ? requested
       : initial.admin ? "@command" : initial.rooms[0]?.name || "@direct";
   });
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [status, setStatus] = useState("connecting");
   const [draft, setDraft] = useState("");
+  const [replyTarget, setReplyTarget] = useState(null);
+  const [notifications, setNotifications] = useState(() => {
+    try { return typeof Notification !== "undefined" && Notification.permission === "granted" && localStorage.getItem("commonroom-notifications") === "on"; } catch { return false; }
+  });
+  const notificationsRef = useRef(notifications);
+  useEffect(() => { setReplyTarget(null); }, [selected]);
+  async function toggleNotifications() {
+    if (!("Notification" in window) || !window.isSecureContext) {
+      append("Notifications", "Desktop notifications require a supported browser and HTTPS (or localhost).", true); return;
+    }
+    try {
+      const enabled = !notifications && (Notification.permission === "granted" || await Notification.requestPermission() === "granted");
+      notificationsRef.current = enabled;
+      setNotifications(enabled);
+      localStorage.setItem("commonroom-notifications", enabled ? "on" : "off");
+      if (!enabled && Notification.permission === "denied") append("Notifications", "Notifications are blocked. Change permission in Chrome site settings.", true);
+    } catch { append("Notifications", "This browser cannot enable notifications.", true); }
+  }
+  function reactTo(message, value) {
+    if (!value.trim() || request.current || socket.current?.readyState !== WebSocket.OPEN) return;
+    const id = ++serial.current;
+    const text = `/react ${message.id} ${value.trim()}`;
+    request.current = {id, text, room:selected, key:null, action:true};
+    setPending(true);
+    socket.current.send(JSON.stringify({id, room: direct || consoleView ? null : selected, text}));
+  }
   const [output, setOutput] = useState([]);
   const [cleared, setCleared] = useState({});
   const [pending, setPending] = useState(false);
@@ -187,16 +218,31 @@ function Chat({ initial, onLogout }) {
   const consoleView = selected === "@command";
   const messages = useMemo(() => direct ? privateMessages(state.direct, state.username, peer) : room?.messages || [], [direct, peer, state.direct, state.username, room?.messages]);
   const entries = useMemo(() => timeline(messages, output, ledger.current, cleared[selected] || 0, selected), [messages, output, cleared, selected]);
-  const renderedEntries = useMemo(() => entries.map((entry) => entry.kind === "message" ? <ConsoleMessage key={entry.key} message={entry.message} self={state.username} /> : <ConsoleOutput key={entry.key} entry={entry} />), [entries, state.username]);
+  const renderedEntries = useMemo(() => {
+    let lastDay = null;
+    return entries.map((entry, index) => {
+      if (entry.kind !== "message") return <ConsoleOutput key={entry.key} entry={entry} />;
+      const date = messageDate(entry.message.time);
+      const newDay = lastDay !== date.key;
+      lastDay = date.key;
+      const previous = entries[index - 1];
+      const grouped = previous?.kind === "message" && groupedMessage(entry.message, previous.message);
+      return <div key={entry.key}>
+        {newDay && <div class="message-day"><time dateTime={date.iso}>{date.label}</time></div>}
+        <ConsoleMessage message={entry.message} self={state.username} date={date} grouped={grouped && !entry.message.reply} pending={pending}
+          onReact={(value) => reactTo(entry.message, value)} onReply={() => { setReplyTarget({...entry.message, view:selected}); input.current?.focus(); }} />
+      </div>;
+    });
+  }, [entries, state.username, selected, pending]);
   const hints =
     hintDismissed || pending
       ? []
-      : suggestions(
+      : (draft.startsWith("/") ? suggestions(
           draft,
           state.commands || [],
           state.users,
           state.available_rooms || state.rooms.map((r) => r.name),
-        ).slice(0, 6);
+        ) : mentionSuggestions(draft, direct ? [state.username, ...(peer ? [peer] : [])] : [...(room?.members || [])])).slice(0, 6);
   const activeHint = Math.min(hintIndex, Math.max(0, hints.length - 1));
 
   function append(command, result = null, error = false, view = selected) {
@@ -237,6 +283,7 @@ function Chat({ initial, onLogout }) {
         attempts = 0;
         setStatus("online");
       };
+      let baseline = true;
       ws.onmessage = (event) => {
         let data;
         try {
@@ -245,6 +292,13 @@ function Chat({ initial, onLogout }) {
           return;
         }
         if (data.kind === "snapshot") {
+          notifyMentions(currentState.current, data, {
+            baseline, enabled: notificationsRef.current,
+            NotificationClass: window.Notification,
+            background: document.hidden || !document.hasFocus(), selected: selectedRef.current,
+            open: view => { window.focus(); setSelected(view); },
+          });
+          baseline = false;
           ingest(data, ledger.current);
           currentState.current = data;
           setState(data);
@@ -263,8 +317,9 @@ function Chat({ initial, onLogout }) {
           const error = data.kind === "error";
           if (current.key) complete(current.key, data.text || "Done.", error);
           else if (error) append(current.text, data.text, true, current.room);
-          if (!error) {
+          if (!error && !current.action) {
             setDraft("");
+            if (current.reply) setReplyTarget(null);
             const [command, target] = current.text.trim().split(/\s+/);
             if (["/new", "/join"].includes(command) && target) {
               desiredRoom.current = target;
@@ -387,10 +442,12 @@ function Chat({ initial, onLogout }) {
       text,
       room: selected,
       key: text.startsWith("/") ? append(text) : null,
+      reply: !!replyTarget && !text.startsWith("/"),
     };
     setPending(true);
     setHintDismissed(true);
     let wireText = peer && !text.startsWith("/") ? `/tell ${peer} ${text}` : draft;
+    if (replyTarget && !text.startsWith("/")) wireText = `/reply ${replyTarget.id} ${draft}`;
     if (peer && /^\/history(?:\s+\d+)?$/.test(text))
       wireText = `${text === "/history" ? "/history 50" : text} ${peer}`;
     socket.current.send(
@@ -453,6 +510,9 @@ function Chat({ initial, onLogout }) {
               <strong>{state.username}</strong>
               <small>{state.admin ? "admin" : "user"}</small>
             </div>
+            <button class="notification-toggle" onClick={toggleNotifications} aria-pressed={notifications} aria-label={notifications ? "Disable mention notifications" : "Enable mention notifications"} title={notifications ? "Mention notifications on" : "Enable mention notifications"}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Zm5 3h4" /></svg>
+            </button>
             <button
               class="signout"
               onClick={logout}
@@ -544,6 +604,7 @@ function Chat({ initial, onLogout }) {
               ))}
             </ul>
           )}
+          {replyTarget && <div class="reply-composer"><div><strong>Reply to {replyTarget.from}</strong><p dir="auto">{Array.from(replyTarget.text).slice(0,160).join("")}</p></div><button type="button" aria-label="Cancel reply" onClick={() => setReplyTarget(null)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>}
           <form class="composer" onSubmit={send}>
             <span class="prompt" aria-hidden="true">
               ›
@@ -605,24 +666,26 @@ function ConsoleOutput({ entry }) {
     </article>
   );
 }
-function ConsoleMessage({ message, self }) {
+function ConsoleMessage({ message, self, date, grouped, pending, onReact, onReply }) {
+  const [reaction, setReaction] = useState("");
+  const [reactionOpen, setReactionOpen] = useState(false);
+  const text = mentionedText(message.text, message.mentions);
   return (
-    <article class={`console-message ${message.from === self ? "own" : ""}`}>
-      <time
-        dateTime={new Date(message.time * 1000).toISOString()}
-        title={new Date(message.time * 1000).toLocaleString()}
-      >
-        {new Date(message.time * 1000).toLocaleTimeString(undefined, {
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-        })}
-      </time>
-      <strong>
-        {message.from}
-
-      </strong>
-      <p dir="auto">{message.text}</p>
+    <article id={`message-${message.id}`} class={`chat-message ${message.from === self ? "own" : ""} ${grouped ? "grouped" : ""}`} title={date.full}>
+      {grouped && <time class="continuation-time" dateTime={date.iso} aria-label={date.full}>{date.time}</time>}
+      <div class="message-content">
+        {!grouped && <header class="message-meta"><strong class="message-author">{message.from}</strong><time dateTime={date.iso} title={date.full} aria-label={date.full}>{date.time}</time></header>}
+        {message.reply && <button class="reply-quote" onClick={() => document.getElementById(`message-${message.reply.id}`)?.scrollIntoView({block:"center"})} title="Jump to original message if it is loaded"><strong>↳ {message.reply.from}</strong><span dir="auto">{message.reply.text}</span></button>}
+        <p dir="auto">{text.map((part,index) => part.mention ? <mark key={index} class="mention">{part.text}</mark> : part.text)}</p>
+        <div class="message-reactions">{Object.entries(message.reactions || {}).map(([value, users]) => <button key={value} disabled={pending} aria-pressed={users.includes(self)} title={users.join(", ")} aria-label={`React ${value}: ${users.length}`} onClick={() => onReact(value)}>{value}<span>{users.length}</span></button>)}</div>
+      </div>
+      <div class="message-actions">
+        <button type="button" disabled={pending} onClick={onReply} aria-label={`Reply to ${message.from}'s message`}>Reply</button>
+        <details open={reactionOpen} onToggle={event => setReactionOpen(event.currentTarget.open)}><summary aria-label={`Add reaction to ${message.from}'s message`}>+</summary><div class="reaction-picker">
+          <div class="reaction-choices">{["👍","❤️","😂","🎉","👀"].map(value => <button key={value} type="button" disabled={pending} aria-label={`Add reaction ${value}`} onClick={() => { onReact(value); setReactionOpen(false); }}>{value}</button>)}</div>
+          <form onSubmit={(event) => { event.preventDefault(); onReact(reaction); setReaction(""); setReactionOpen(false); }}><input aria-label="Custom reaction" placeholder="Emoji or text" value={reaction} onInput={e => setReaction(e.currentTarget.value)} /><button disabled={pending || !reaction.trim()}>Add</button></form>
+        </div></details>
+      </div>
     </article>
   );
 }

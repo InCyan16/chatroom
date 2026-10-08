@@ -54,6 +54,18 @@ pub struct Message {
     pub to: Option<String>,
     pub text: String,
     pub time: u64,
+    #[serde(default)]
+    pub reactions: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    pub reply: Option<Reply>,
+    #[serde(default)]
+    pub mentions: BTreeSet<String>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reply {
+    pub id: String,
+    pub from: String,
+    pub text: String,
 }
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Room {
@@ -123,11 +135,11 @@ impl Engine {
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 1 {
+        if version > 2 {
             return Err("This data folder was written by a newer, incompatible server.".into());
         }
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);").map_err(|e| e.to_string())?;
-        db.execute_batch("PRAGMA user_version=1;")
+        db.execute_batch("PRAGMA user_version=2;")
             .map_err(|e| e.to_string())?;
         let raw = db.query_row("SELECT json FROM state WHERE id=1", [], |r| {
             r.get::<_, String>(0)
@@ -450,10 +462,108 @@ impl Engine {
             if target.messages.len() == self.max_messages {
                 target.messages.pop_front();
             }
-            target.messages.push_back(new_message(author, None, input));
+            let mut message = new_message(author, None, input);
+            message
+                .mentions
+                .retain(|name| target.members.contains(name));
+            target.messages.push_back(message);
             return Ok(String::new());
         }
         match parts[0] {
+            "/react" | "/reply" => {
+                let user = actor.ok_or("Message actions require a user account.")?;
+                let content = input.strip_prefix(parts[0]).unwrap().trim_start();
+                let (id, value) = content
+                    .split_once(char::is_whitespace)
+                    .ok_or("Usage: /react message-id reaction or /reply message-id message")?;
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err("A reaction or reply cannot be empty.".into());
+                }
+                let original = if let Some(name) = room {
+                    let target = self.data.rooms.get(name).ok_or("Room not found.")?;
+                    if !target.members.contains(user) {
+                        return Err("You are not a member of this room.".into());
+                    }
+                    target.messages.iter().find(|m| m.id == id)
+                } else {
+                    self.data
+                        .direct
+                        .iter()
+                        .find(|m| m.id == id && (m.from == user || m.to.as_deref() == Some(user)))
+                }
+                .cloned()
+                .ok_or("Message not found in this conversation (it may have expired).")?;
+                if parts[0] == "/react" {
+                    if value.chars().count() > 16 || value.chars().any(char::is_control) {
+                        return Err(
+                            "Reactions support 1–16 characters without control characters.".into(),
+                        );
+                    }
+                    let target = if let Some(name) = room {
+                        self.data
+                            .rooms
+                            .get_mut(name)
+                            .unwrap()
+                            .messages
+                            .iter_mut()
+                            .find(|m| m.id == id)
+                    } else {
+                        self.data.direct.iter_mut().find(|m| m.id == id)
+                    }
+                    .unwrap();
+                    if !target.reactions.contains_key(value) && target.reactions.len() >= 32 {
+                        return Err("This message already has 32 different reactions.".into());
+                    }
+                    let users = target.reactions.entry(value.into()).or_default();
+                    if !users.insert(user.into()) {
+                        users.remove(user);
+                    }
+                    if users.is_empty() {
+                        target.reactions.remove(value);
+                    }
+                    return Ok("Reaction updated.".into());
+                }
+                if value.chars().count() > 4000 {
+                    return Err("Messages support at most 4000 characters.".into());
+                }
+                let recipient = if room.is_none() {
+                    let peer = if original.from == user {
+                        original.to.as_deref().unwrap()
+                    } else {
+                        &original.from
+                    };
+                    if !self.active(peer) {
+                        return Err("User not found.".into());
+                    }
+                    Some(peer)
+                } else {
+                    None
+                };
+                let mut message = new_message(user, recipient, value);
+                message.reply = Some(Reply {
+                    id: original.id.clone(),
+                    from: original.from.clone(),
+                    text: original.text.chars().take(160).collect(),
+                });
+                if let Some(name) = room {
+                    let target = self.data.rooms.get_mut(name).unwrap();
+                    message
+                        .mentions
+                        .retain(|name| target.members.contains(name));
+                    if target.messages.len() == self.max_messages {
+                        target.messages.pop_front();
+                    }
+                    target.messages.push_back(message);
+                } else {
+                    message
+                        .mentions
+                        .retain(|name| name == user || Some(name.as_str()) == recipient);
+                    self.data.direct.push(message);
+                    trim(&mut self.data.direct);
+                }
+                Ok(String::new())
+            }
             "/help" => {
                 require_len(&parts, 1, "/help")?;
                 Ok(crate::commands::help(admin, actor.is_none()))
@@ -752,9 +862,11 @@ impl Engine {
                 if !self.active(recipient) {
                     return Err("User not found.".into());
                 }
-                self.data
-                    .direct
-                    .push(new_message(author, Some(recipient), text));
+                let mut message = new_message(author, Some(recipient), text);
+                message
+                    .mentions
+                    .retain(|name| name == author || name == recipient);
+                self.data.direct.push(message);
                 trim(&mut self.data.direct);
                 Ok(format!("Private message sent to {recipient}."))
             }
@@ -851,7 +963,31 @@ fn new_message(from: &str, to: Option<&str>, text: &str) -> Message {
         to: to.map(String::from),
         text: text.into(),
         time: now(),
+        reactions: BTreeMap::new(),
+        reply: None,
+        mentions: mentioned_names(text),
     }
+}
+fn mentioned_names(text: &str) -> BTreeSet<String> {
+    let mut result = BTreeSet::new();
+    for (index, ch) in text.char_indices() {
+        if ch != '@'
+            || text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '@'))
+        {
+            continue;
+        }
+        let name: String = text[index + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect();
+        if valid_name(&name) {
+            result.insert(name);
+        }
+    }
+    result
 }
 fn trim(messages: &mut Vec<Message>) {
     if messages.len() > PRIVATE_HISTORY {
@@ -1138,6 +1274,155 @@ mod tests {
         assert_eq!(e.max_messages, 2);
         assert_eq!(e.max_users, 64);
         assert_eq!(e.revision, revision);
+    }
+    #[test]
+    fn message_actions_are_scoped_toggle_and_preserve_reply_quotes() {
+        let mut e = engine();
+        e.execute(
+            Some("alice"),
+            Some("lobby"),
+            "你好 @bob! @eve and mail@alice.com",
+        )
+        .unwrap();
+        let original = e.data.rooms["lobby"].messages.back().unwrap().clone();
+        assert_eq!(
+            original.mentions,
+            BTreeSet::from(["bob".into(), "eve".into()])
+        );
+        let react = format!("/react {} 好👍", original.id);
+        e.execute(Some("bob"), Some("lobby"), &react).unwrap();
+        e.execute(Some("alice"), Some("lobby"), &react).unwrap();
+        assert_eq!(e.data.rooms["lobby"].messages[0].reactions["好👍"].len(), 2);
+        e.execute(Some("bob"), Some("lobby"), &react).unwrap();
+        assert_eq!(
+            e.data.rooms["lobby"].messages[0].reactions["好👍"],
+            BTreeSet::from(["alice".into()])
+        );
+        assert!(
+            e.execute(
+                Some("bob"),
+                Some("lobby"),
+                &format!("/react {} {}", original.id, "a".repeat(17))
+            )
+            .is_err()
+        );
+        assert!(
+            e.execute(
+                Some("bob"),
+                Some("lobby"),
+                &format!("/react {} bad\nreaction", original.id)
+            )
+            .is_err()
+        );
+        e.set_limits(64, 64, 1).unwrap();
+        e.execute(
+            Some("bob"),
+            Some("lobby"),
+            &format!("/reply {} @alice 回答", original.id),
+        )
+        .unwrap();
+        let reply = &e.data.rooms["lobby"].messages[0];
+        assert_eq!(reply.reply.as_ref().unwrap().id, original.id);
+        assert_eq!(reply.reply.as_ref().unwrap().text, original.text);
+        assert_eq!(reply.mentions, BTreeSet::from(["alice".into()]));
+        assert!(e.execute(Some("bob"), Some("lobby"), &react).is_err());
+        e.execute(Some("alice"), None, "/new secret").unwrap();
+        e.execute(Some("alice"), Some("secret"), "private-room")
+            .unwrap();
+        let id = e.data.rooms["secret"].messages[0].id.clone();
+        for action in ["react", "reply"] {
+            assert!(
+                e.execute(Some("eve"), Some("secret"), &format!("/{action} {id} nope"))
+                    .is_err()
+            );
+            assert!(
+                e.execute(Some("eve"), Some("lobby"), &format!("/{action} {id} nope"))
+                    .is_err()
+            );
+        }
+        e.execute(Some("alice"), None, "/tell bob @bob @eve secret DM")
+            .unwrap();
+        let dm = e.data.direct.last().unwrap().clone();
+        assert_eq!(dm.mentions, BTreeSet::from(["bob".into()]));
+        assert!(
+            e.execute(Some("eve"), None, &format!("/react {} 👍", dm.id))
+                .is_err()
+        );
+        assert!(
+            e.execute(Some("eve"), None, &format!("/reply {} stolen", dm.id))
+                .is_err()
+        );
+        e.execute(Some("bob"), None, &format!("/reply {} @alice 好", dm.id))
+            .unwrap();
+        assert_eq!(e.data.direct.last().unwrap().to.as_deref(), Some("alice"));
+        assert!(e.snapshot("eve").unwrap().direct.is_empty());
+    }
+    #[test]
+    fn schema_one_migration_keeps_accounts_history_and_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.sqlite");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("CREATE TABLE state(id INTEGER PRIMARY KEY, json TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
+            let legacy = serde_json::json!({
+                "users":{"alice":{"hash":"hash", "admin":true, "disabled":false}},
+                "rooms":{"room":{"members":["alice"], "messages":[{"id":"old", "from":"alice", "to":null, "text":"旧消息", "time":1}]}},
+                "direct":[], "sessions":{"token":{"username":"alice", "expires":now()+43200}}
+            });
+            db.execute(
+                "INSERT INTO state(id,json) VALUES(1,?1)",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+        }
+        let e = Engine::open(&path).unwrap();
+        assert!(e.is_admin("alice"));
+        assert_eq!(e.session("token"), Some("alice".into()));
+        assert_eq!(e.data.rooms["room"].messages[0].text, "旧消息");
+        assert!(e.data.rooms["room"].messages[0].reactions.is_empty());
+        assert!(e.data.rooms["room"].messages[0].reply.is_none());
+    }
+    #[test]
+    fn message_features_migrate_persist_and_rollback() {
+        let legacy: Message = serde_json::from_str(
+            r#"{"id":"old","from":"alice","to":null,"text":"legacy","time":1}"#,
+        )
+        .unwrap();
+        assert!(
+            legacy.reply.is_none() && legacy.mentions.is_empty() && legacy.reactions.is_empty()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.sqlite");
+        {
+            let mut e = Engine::open(&path).unwrap();
+            e.provision("alice", "hash".into(), true, false).unwrap();
+            e.execute(Some("alice"), None, "/new room").unwrap();
+            e.execute(Some("alice"), Some("room"), "@alice 中文")
+                .unwrap();
+            let id = e.data.rooms["room"].messages[0].id.clone();
+            e.execute(Some("alice"), Some("room"), &format!("/reply {id} reply"))
+                .unwrap();
+            e.execute(Some("alice"), Some("room"), &format!("/react {id} 🙂"))
+                .unwrap();
+            let previous = e.data.clone();
+            e.db.execute_batch("PRAGMA query_only=ON;").unwrap();
+            assert!(
+                e.execute(Some("alice"), Some("room"), &format!("/react {id} 🙂"))
+                    .is_err()
+            );
+            assert!(e.data == previous);
+        }
+        let e = Engine::open(&path).unwrap();
+        assert_eq!(
+            e.data.rooms["room"].messages[0].reactions["🙂"],
+            BTreeSet::from(["alice".into()])
+        );
+        assert!(e.data.rooms["room"].messages[1].reply.is_some());
+        assert_eq!(
+            e.db.query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            2
+        );
     }
     #[test]
     fn password_hashing() {

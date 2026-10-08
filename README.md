@@ -53,8 +53,13 @@ New accounts have no room memberships. Type messages or commands in the composer
 a line. Use `/help` for commands grouped into General, Account, Rooms, Messages, and Server, filtered by your role. Typing `/`
 shows contextual command and argument hints; arrow keys select a hint, Tab
 completes it, and Escape closes the hints. Enter executes what you typed.
-The message area is a console: commands and replies are printed alongside
-chat messages, only in your current tab and the view where the command ran.
+Chat messages use a Discord-style layout, all aligned on the left, with the
+sender and local time above the text. Consecutive
+messages from one sender are grouped within five minutes; commands break the
+group. Dates, times, and date separators follow the browser timezone, with the
+full local date and timezone available on timestamp hover. The server stores
+Unix timestamps in seconds. Commands and replies retain their console format
+alongside chat messages, only in your current tab and the view where the command ran.
 The Command view has its own local history. Private messages are grouped by
 person; only people with saved message history appear in the list. Start a
 new private conversation with `/tell person message`; typing in a private conversation is equivalent to `/tell person message`. Reloading clears command output and
@@ -63,6 +68,33 @@ messages. `/history 200` reads more retained messages on demand. `/clear`
 clears the local display without deleting server history; refresh restores it.
 The URL remembers the selected room, so refresh returns to the same conversation.
 Every permission check happens on the server.
+
+Message actions appear on hover (always on touch devices). Use **Reply** to
+quote a message in the composer, or **+** to choose an emoji/custom UTF-8
+reaction. Clicking a reaction toggles your participation. Reactions allow
+1–16 Unicode characters without control characters, with at most 32 distinct
+reactions per message. Reactions and replies are persisted for both rooms and
+private conversations; only conversation participants may use them. Quoted
+replies keep the original author's name and a 160-character preview even after
+the original message expires. The quote jumps to the original if it is loaded.
+
+Type `@username` to mention a room member or the other private-chat participant;
+name completion appears as you type. Names are case-sensitive. The server
+records mentions only for participants in that conversation; email addresses
+are not treated as mentions. Text and custom reactions remain UTF-8.
+
+For desktop Chrome notifications, click the bell next to your profile and
+allow notifications in the browser prompt. Production needs HTTPS; localhost
+works for development. The setting is remembered per browser origin.
+Notifications arrive for new mentions while the page is open and its WebSocket
+is connected, when the page is in the background or a different conversation
+is selected. Reading the same conversation in the foreground suppresses the
+notification. Clicking a notification opens its conversation. Reactions,
+refresh, history joins and reconnect snapshots do not replay notifications.
+Notifications are not push delivery to a closed browser/tab, and browser/OS
+notification settings can block them. Private message previews can appear in
+system notifications only after you opt in.
+
 
 | Command | Who | Behavior |
 | --- | --- | --- |
@@ -76,6 +108,8 @@ Every permission check happens on the server.
 | `/join room` | Everyone | Open a room you already belong to; admins can join any room |
 | `/leave [room]` | Everyone | Leave the specified or selected room; an admin must add regular users back |
 | `/tell user message` | Everyone | Private message, visible only to sender and recipient |
+| `/react message-id reaction` | Web users | Toggle your reaction on a retained message in the selected room or your private history |
+| `/reply message-id message` | Web users | Reply in the selected room, or to the other participant of a private message |
 | `/new room` | Admin or stdin | Create a room; the web admin becomes its first member |
 | `/add user [room]` | Admin or stdin | Add an existing account; defaults to the selected room in the web UI |
 | `/kick user [room]` | Admin or stdin | Revoke room access immediately |
@@ -292,7 +326,9 @@ SQLite may also have `chat.sqlite-wal` and `chat.sqlite-shm`; copy the whole
 folder, never just the database while it is running. The stored format uses
 portable SQLite and JSON, with no machine-specific paths or secrets outside
 the data folder. Only one process can use a folder at once. Compatible newer
-binaries can read schema v1; older binaries reject unknown newer schema
+binaries read schema v1 and migrate it to v2 without discarding accounts or
+messages. Schema v2 adds reactions, replies and mentions; older binaries
+reject unknown newer schema
 versions. Browser login sessions keep their original 12-hour expiry across
 restart and migration. Accounts, roles, memberships, message timestamps and
 IDs remain the same. Proxy certificates, DNS, and OS-specific binaries are
@@ -375,14 +411,14 @@ share the data folder. Replacing the frontend requires rebuilding the binary.
 
 ## Current validation status
 
-Verified on October 7, 2026:
+Verified on October 8, 2026:
 
-- Rust formatting passes, and all 12 unit tests pass.
-- Frontend console ordering, refresh/clear behavior, and hint completion tests pass.
+- Rust formatting passes, and all 27 unit tests pass.
+- All 10 frontend tests pass, including timezone, mentions and notification deduplication.
 - Clippy passes for all targets with warnings denied.
 - Web production build and Rust debug/release builds pass.
 - HTTP/WebSocket integration tests pass, including data-folder migration and
-  the production security checks described above.
+  room/private reactions and replies, mention metadata, and production security checks.
 - Browser checks pass for login, room creation and selection, message delivery,
   desktop layout, and the mobile navigation drawer. No browser warnings or
   errors were observed during these checks.

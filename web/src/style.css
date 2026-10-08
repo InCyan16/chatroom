@@ -459,28 +459,6 @@ textarea {
   font-size: 13px;
   line-height: 1.7;
 }
-.console-message {
-  display: grid;
-  grid-template-columns: 52px auto 1fr;
-  gap: 12px;
-  align-items: baseline;
-  padding: 5px 0;
-}
-.console-message time {
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 11px;
-}
-.console-message strong {
-  font-size: 12px;
-  color: var(--ink);
-  font-weight: 600;
-}
-.console-message p {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  min-width: 0;
-}
 .console-output {
   margin: 20px 0;
 }
@@ -569,13 +547,7 @@ textarea {
     flex-direction: column;
     gap: 2px;
   }
-  .console-message {
-    grid-template-columns: 46px 1fr;
-    gap: 4px 8px;
-  }
-  .console-message p {
-    grid-column: 2;
-  }
+
 }
 
 .navigation {
@@ -672,7 +644,60 @@ button:focus-visible { outline-color: var(--accent); }
 }
 .room-title { justify-self: center; }
 .connection { justify-self: end; }
-@media (min-width: 701px) {
-  .console-message { grid-template-columns: 52px 12ch minmax(0, 1fr); }
-  .console-message strong { overflow-wrap: anywhere; }
+/* Chat messages use the UI font; command output keeps its console typography. */
+.chat-message {
+  position: relative;
+  padding: 16px 10px 2px 56px;
+  margin: 0 -10px;
+  border-radius: 5px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.chat-message.grouped { padding-top: 2px; }
+.chat-message:hover { background: var(--wash); }
+.message-content { min-width: 0; }
+.message-meta { display: flex; align-items: baseline; gap: 10px; margin-bottom: 3px; }
+.message-author { font-size: 13px; overflow-wrap: anywhere; }
+.message-content p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-meta time, .continuation-time { font-size: 10px; line-height: 1.4; color: #666661; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.continuation-time { position: absolute; left: 10px; top: 6px; opacity: 0; }
+.chat-message:hover .continuation-time { opacity: 1; }
+.message-day { display: flex; align-items: center; gap: 16px; padding: 24px 0 6px; font: 11px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #666661; }
+.message-day::before, .message-day::after { content: ""; height: 1px; background: var(--line); flex: 1; }
+.message-day time { white-space: nowrap; }
+@media (hover: none) { .continuation-time { opacity: 1; } }
+
+.notification-toggle { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 6px; flex-shrink: 0; }
+.notification-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.notification-toggle:hover, .notification-toggle[aria-pressed="true"] { background: var(--wash); }
+.mention { background: var(--wash); color: var(--ink); border-radius: 3px; padding: 0 2px; font-weight: 600; }
+.message-actions { display: flex; align-items: center; gap: 4px; margin: 4px 0 0; font-size: 11px; }
+.message-actions > button, .message-actions summary { padding: 2px 7px; border-radius: 4px; cursor: pointer; list-style: none; }
+.message-actions summary::-webkit-details-marker { display: none; }
+.message-actions > button:hover, .message-actions summary:hover { background: var(--line); }
+.message-actions details { position: relative; }
+.reaction-picker { position: absolute; z-index: 3; left: 0; top: 24px; width: min(250px, 65vw); padding: 10px; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; box-shadow: 0 4px 15px #2d2d2b12; }
+.reaction-choices { display: flex; gap: 6px; margin-bottom: 8px; }
+.reaction-choices button { padding: 5px; border-radius: 4px; font-size: 18px; }
+.reaction-choices button:hover { background: var(--wash); }
+.reaction-picker form { display: flex; gap: 6px; }
+.reaction-picker input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding: 6px; background: #fff; }
+.reaction-picker form button { background: var(--accent); padding: 5px 8px; border-radius: 4px; }
+.message-reactions { display: flex; flex-wrap: wrap; gap: 5px; }
+.message-reactions:not(:empty) { margin-top: 5px; }
+.message-reactions button { display: flex; align-items: center; gap: 6px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); font-size: 12px; }
+.message-reactions button[aria-pressed="true"] { border-color: var(--ink); background: var(--wash); }
+.message-reactions span { font-size: 10px; }
+.reply-quote { display: flex; align-items: baseline; gap: 8px; max-width: 100%; padding: 3px 9px; margin-bottom: 5px; border-left: 2px solid var(--ink); font-size: 12px; text-align: left; }
+.reply-quote strong { flex-shrink: 0; }
+.reply-quote span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.reply-composer { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-left: 2px solid var(--ink); padding: 5px 10px; margin-bottom: 8px; font-size: 12px; }
+.reply-composer div { min-width: 0; }
+.reply-composer p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-composer button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; flex-shrink: 0; }
+.reply-composer svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+@media (hover: hover) {
+  .message-actions { opacity: 0; }
+  .chat-message:hover .message-actions, .chat-message:focus-within .message-actions { opacity: 1; }
 }

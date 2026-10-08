@@ -284,6 +284,20 @@ try {
   await send(bob, "a retained room message", "study");
   const multilingual = "你好 日本語 한국어 مرحبا नमस्ते Привет שלום 🙂 e\u0301";
   await send(bob, multilingual, "study");
+  await until(() => bob.snapshot.rooms.find(r => r.name === "study").messages.at(-1)?.text === multilingual, "Unicode room delivery");
+  const roomMessageId = bob.snapshot.rooms.find(r => r.name === "study").messages.at(-1).id;
+  await send(alice, `/react ${roomMessageId} 好👍`, "study");
+  await until(() => bob.snapshot.rooms.find(r => r.name === "study").messages.find(m => m.id === roomMessageId)?.reactions["好👍"]?.includes("alice"), "reaction broadcast");
+  await send(bob, `/react ${roomMessageId} 好👍`, "study");
+  await until(() => alice.snapshot.rooms.find(r => r.name === "study").messages.find(m => m.id === roomMessageId)?.reactions["好👍"]?.length === 2, "shared reaction count");
+  await send(alice, `/react ${roomMessageId} 好👍`, "study");
+  await send(bob, `/reply ${roomMessageId} @alice 回答 🙂`, "study");
+  await until(() => alice.snapshot.rooms.find(r => r.name === "study").messages.at(-1)?.reply?.id === roomMessageId, "reply delivery");
+  const roomReply = alice.snapshot.rooms.find(r => r.name === "study").messages.at(-1);
+  assert.deepEqual(roomReply.mentions, ["alice"]);
+  assert.equal(roomReply.reply.text, multilingual);
+  await send(eve, `/react ${roomMessageId} 👀`, "study", "error");
+  await send(eve, `/reply ${roomMessageId} no access`, "study", "error");
   const longUnicode = "🙂".repeat(4000);
   await send(bob, `/tell alice ${longUnicode}`, null, "notice", true);
   await until(() => alice.snapshot.direct.some((m) => m.text === longUnicode), "full-length UTF-8 private message");
@@ -306,6 +320,14 @@ try {
       ),
     ),
   );
+  const dmId = alice.snapshot.direct.find(m => m.text === "a private message").id;
+  await send(alice, `/react ${dmId} ❤️`, null);
+  await send(alice, `/reply ${dmId} @bob 私信`, null);
+  await until(() => bob.snapshot.direct.at(-1)?.reply?.id === dmId, "private reply delivery");
+  assert.equal(bob.snapshot.direct.at(-1).to, "bob");
+  assert.deepEqual(bob.snapshot.direct.at(-1).mentions, ["bob"]);
+  await send(eve, `/react ${dmId} ❤️`, null, "error");
+  await send(eve, `/reply ${dmId} leak`, null, "error");
   await send(alice, "/kick bob study");
   await until(
     () => !bob.snapshot.rooms.some((r) => r.name === "study"),
@@ -319,7 +341,7 @@ try {
   await cp(source, destination, { recursive: true });
   const migratedConfigPath = join(destination, "config.json");
   const migratedConfig = JSON.parse(await readFile(migratedConfigPath, "utf8"));
-  migratedConfig.max_messages = 2;
+  migratedConfig.max_messages = 4;
   await writeFile(migratedConfigPath, JSON.stringify(migratedConfig));
   await start(destination);
   const resumed = await request("me", cookies.alice);
@@ -332,19 +354,22 @@ try {
       .messages.some((m) => m.text === "a retained room message"),
   );
   assert.ok(state.direct.some((m) => m.text === "a private message"));
+  assert.ok(state.rooms.find(r => r.name === "study").messages.some(m => m.reply?.text === multilingual && m.mentions.includes("alice")));
+  assert.ok(state.direct.some(m => m.reply && m.mentions.includes("bob")));
+  assert.ok(state.direct.find(m => m.text === "a private message").reactions["❤️"].includes("alice"));
   const migratedAlice = await connect(cookies.alice);
   await send(migratedAlice, "/configs", null);
-  assert.equal(JSON.parse(migratedAlice.frames.find((f) => f.id === migratedAlice.serial).text).max_messages, 2);
-  for (const text of ["ring oldest", "ring middle 你好", "ring newest 🙂"]) {
+  assert.equal(JSON.parse(migratedAlice.frames.find((f) => f.id === migratedAlice.serial).text).max_messages, 4);
+  for (const text of ["ring first", "ring oldest", "ring next", "ring middle 你好", "ring newest 🙂"]) {
     await send(migratedAlice, text, "study");
   }
   await until(() => migratedAlice.snapshot.rooms.find((r) => r.name === "study").messages.at(-1)?.text === "ring newest 🙂", "bounded room delivery");
-  assert.deepEqual(migratedAlice.snapshot.rooms.find((r) => r.name === "study").messages.map((m) => m.text), ["ring middle 你好", "ring newest 🙂"]);
-  await send(migratedAlice, "/history 3", "study", "error");
+  assert.deepEqual(migratedAlice.snapshot.rooms.find((r) => r.name === "study").messages.map((m) => m.text), ["ring oldest", "ring next", "ring middle 你好", "ring newest 🙂"]);
+  await send(migratedAlice, "/history 5", "study", "error");
   await send(migratedAlice, "/history", "study");
   assert.match(migratedAlice.frames.find((f) => f.id === migratedAlice.serial).text, /ring middle 你好/);
   const boundedState = await (await request("me", cookies.alice)).json();
-  assert.equal(boundedState.rooms.find((r) => r.name === "study").messages.length, 2);
+  assert.equal(boundedState.rooms.find((r) => r.name === "study").messages.length, 4);
   assert.ok(boundedState.direct.some((m) => m.text === "a private message"));
   const migratedBob = await connect(cookies.bob);
   child.stdin.write("/reset bob changed-long-password\n");

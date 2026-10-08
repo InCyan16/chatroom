@@ -123,6 +123,20 @@ pub fn available(admin: bool, console: bool) -> Vec<Command> {
         ),
         (
             "Messages",
+            "/react",
+            "/react message-id reaction",
+            "Toggle an emoji or text reaction",
+            false,
+        ),
+        (
+            "Messages",
+            "/reply",
+            "/reply message-id message",
+            "Reply to a retained message",
+            false,
+        ),
+        (
+            "Messages",
             "/history",
             "/history [count] [user]",
             "Read retained messages (default up to 50)",
@@ -147,7 +161,11 @@ pub fn available(admin: bool, console: bool) -> Vec<Command> {
         .into_iter()
         .filter(|(_, name, _, _, privileged)| {
             (!privileged || admin)
-                && (!console || !["/passwd", "/join", "/leave", "/tell", "/history"].contains(name))
+                && (!console
+                    || ![
+                        "/passwd", "/join", "/leave", "/tell", "/history", "/react", "/reply",
+                    ]
+                    .contains(name))
         })
         .map(|(section, name, usage, description, admin)| Command {
             name,
