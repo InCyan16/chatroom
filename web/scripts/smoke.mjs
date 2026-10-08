@@ -392,6 +392,42 @@ try {
     "passwords must not appear in logs",
   );
   await stop();
+  // A second device must receive the complete directory before it sends any
+  // command, including empty joined rooms and peers outside visible history.
+  const devices = join(temporary, "devices");
+  await mkdir(devices);
+  await writeFile(join(devices, "config.json"), JSON.stringify({bind:"127.0.0.1:0",origins:[origin],production:false}));
+  await start(devices);
+  for (const name of ["alice", "bob", "eve"]) {
+    child.stdin.write(`/user ${name} ${name}-long-password ${name === "alice" ? "admin" : "user"}\n`);
+    await until(() => logs.includes(`Account ${name} created.`), `device account ${name}`);
+  }
+  const deviceCookie = await login("alice");
+  const deviceOne = await connect(deviceCookie);
+  for (const name of ["empty", "quiet", "active"]) await send(deviceOne, `/new ${name}`, null);
+  await send(deviceOne, "/tell bob older conversation", null);
+  // Use Alice's own DMs to move Bob outside the 50-message history window.
+  for (let i = 0; i < 55; i++) {
+    await send(deviceOne, `/tell eve recent ${i}`, null);
+    if (i % 20 === 19) await pause(10100); // honor the WebSocket rate limit
+  }
+  const assertDirectory = snapshot => {
+    assert.deepEqual(snapshot.rooms.map(room => room.name), ["active", "empty", "quiet"]);
+    assert.ok(snapshot.rooms.every(room => room.messages.length === 0));
+    assert.deepEqual(snapshot.private_peers, ["bob", "eve"]);
+    assert.ok(!snapshot.direct.some(message => message.to === "bob"));
+  };
+  const secondCookie = await login("alice");
+  assertDirectory(await (await request("me", secondCookie)).json());
+  const deviceTwo = await connect(secondCookie);
+  assertDirectory(deviceTwo.snapshot);
+  await send(deviceOne, "/new added_elsewhere", null);
+  await until(() => deviceTwo.snapshot.rooms.some(room => room.name === "added_elsewhere"), "other device membership update");
+  deviceTwo.ws.terminate();
+  const reconnected = await connect(secondCookie);
+  assert.deepEqual(reconnected.snapshot.rooms.map(room => room.name), ["active", "added_elsewhere", "empty", "quiet"]);
+  assert.deepEqual(reconnected.snapshot.private_peers, ["bob", "eve"]);
+  await stop();
   await start(join(temporary, "production"), true, undefined, "/commonroom/");
   const bare = await fetch(base, { headers: { "X-Forwarded-Proto": "https" }, redirect: "manual" });
   assert.equal(bare.status, 308);
@@ -475,7 +511,7 @@ try {
   });
   assert.equal(spoofed.status, 403, "forwarded headers cannot impersonate a trusted socket peer");
   console.log(
-    "PASS: login, roles, room privacy, DMs, revocation, folder migration, embedded assets, production HTTPS checks, secure cookies, and proxy IP trust.",
+    "PASS: login, second-device directories and reconnects, roles, room privacy, DMs, revocation, folder migration, embedded assets, production HTTPS checks, secure cookies, and proxy IP trust.",
   );
 } finally {
   try {

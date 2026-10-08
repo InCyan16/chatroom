@@ -4,6 +4,8 @@ import "./style.css";
 import { messageDate, groupedMessage } from "./messages.js";
 import { mentionSuggestions, mentionedText } from "./interactions.js";
 import { notifyMentions } from "./notifications.js";
+import { snapshotSync } from "./sync.js";
+import { defaultFonts, loadFonts, saveFonts } from "./settings.js";
 import { ingest, timeline, suggestions, privatePeers, privateMessages, redactCommand, helpSections } from "./console.js";
 
 if (import.meta.env.PROD && location.protocol !== "https:") {
@@ -18,6 +20,7 @@ async function api(path, body) {
   const response = await fetch(new URL(`api/${path}`, document.baseURI), {
     method: body === undefined ? "GET" : "POST",
     credentials: "same-origin",
+    cache: "no-store",
     ...(body === undefined
       ? {}
       : {
@@ -132,6 +135,13 @@ function Login({ onLogin, initialError }) {
 }
 
 function Chat({ initial, onLogout }) {
+  const [fonts, setFonts] = useState(() => { try { return loadFonts(localStorage); } catch { return {...defaultFonts}; } });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--chat-font-size", `${fonts.chat}px`);
+    document.documentElement.style.setProperty("--ui-font-size", `${fonts.ui}px`);
+    try { saveFonts(localStorage, fonts); } catch { /* Storage may be blocked. */ }
+  }, [fonts]);
   const [state, setState] = useState(initial);
   const currentState = useRef(initial);
   const [selected, setSelected] = useState(() => {
@@ -176,6 +186,8 @@ function Chat({ initial, onLogout }) {
   const [pending, setPending] = useState(false);
   const [menu, setMenu] = useState(() => window.matchMedia("(min-width: 701px)").matches);
   const [composerHeight, setComposerHeight] = useState(24);
+  const minimumComposerHeight = Math.ceil(fonts.chat * 1.5 + 6);
+  const actualComposerHeight = Math.max(minimumComposerHeight, composerHeight);
   const resizeStart = useRef(null);
   const menuButton = useRef(null);
   function closeMenu() {
@@ -183,13 +195,13 @@ function Chat({ initial, onLogout }) {
     menuButton.current?.focus();
   }
   useEffect(() => {
-    if (!menu) return;
+    if (!menu || settingsOpen) return;
     const close = (event) => { if (event.key === "Escape") closeMenu(); };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [menu]);
+  }, [menu, settingsOpen]);
   function resizeComposer(height) {
-    setComposerHeight(Math.max(24, Math.min(240, window.innerHeight * 0.4, height)));
+    setComposerHeight(Math.max(minimumComposerHeight, Math.min(240, window.innerHeight * 0.4, height)));
   }
   function startResize(event) {
     if (event.button !== 0) return;
@@ -272,6 +284,28 @@ function Chat({ initial, onLogout }) {
     let stopped = false;
     let retry;
     let attempts = 0;
+    const sync = snapshotSync(() => api("me"), (data, baseline) => {
+      notifyMentions(currentState.current, data, {
+        baseline, enabled: notificationsRef.current,
+        NotificationClass: window.Notification,
+        background: document.hidden || !document.hasFocus(), selected: selectedRef.current,
+        open: view => { window.focus(); setSelected(view); },
+      });
+      ingest(data, ledger.current);
+      currentState.current = data;
+      setState(data);
+      if (desiredRoom.current && data.rooms.some(r => r.name === desiredRoom.current)) {
+        setSelected(desiredRoom.current);
+        desiredRoom.current = null;
+      }
+    }, error => {
+      if (["Please log in.", "Account unavailable."].includes(error.message)) onLogout();
+    });
+    const resume = () => { if (!document.hidden) sync.refresh(); };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("pageshow", resume);
+    window.addEventListener("online", resume);
     async function connect() {
       if (stopped) return;
       setStatus("connecting");
@@ -282,6 +316,7 @@ function Chat({ initial, onLogout }) {
       ws.onopen = () => {
         attempts = 0;
         setStatus("online");
+        sync.refresh();
       };
       let baseline = true;
       ws.onmessage = (event) => {
@@ -292,23 +327,8 @@ function Chat({ initial, onLogout }) {
           return;
         }
         if (data.kind === "snapshot") {
-          notifyMentions(currentState.current, data, {
-            baseline, enabled: notificationsRef.current,
-            NotificationClass: window.Notification,
-            background: document.hidden || !document.hasFocus(), selected: selectedRef.current,
-            open: view => { window.focus(); setSelected(view); },
-          });
+          sync.receive(data, baseline);
           baseline = false;
-          ingest(data, ledger.current);
-          currentState.current = data;
-          setState(data);
-          if (
-            desiredRoom.current &&
-            data.rooms.some((r) => r.name === desiredRoom.current)
-          ) {
-            setSelected(desiredRoom.current);
-            desiredRoom.current = null;
-          }
         } else if (["notice", "error"].includes(data.kind)) {
           const current = request.current;
           if (!current || data.id !== current.id) return;
@@ -344,26 +364,19 @@ function Chat({ initial, onLogout }) {
           request.current = null;
           setPending(false);
         }
-        try {
-          await api("me");
-          if (!stopped)
-            retry = setTimeout(
-              connect,
-              Math.min(1000 * 2 ** attempts++, 15000),
-            );
-        } catch (error) {
-          if (
-            ["Please log in.", "Account unavailable."].includes(error.message)
-          )
-            onLogout();
-          else if (!stopped) retry = setTimeout(connect, 5000);
-        }
+        await sync.refresh();
+        if (!stopped) retry = setTimeout(connect, Math.min(1000 * 2 ** attempts++, 15000));
       };
       ws.onerror = () => ws.close();
     }
     connect();
     return () => {
       stopped = true;
+      sync.stop();
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("pageshow", resume);
+      window.removeEventListener("online", resume);
       clearTimeout(retry);
       socket.current?.close();
     };
@@ -510,6 +523,9 @@ function Chat({ initial, onLogout }) {
               <strong>{state.username}</strong>
               <small>{state.admin ? "admin" : "user"}</small>
             </div>
+            <button class="settings-toggle" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.6 2.2-1.7 1L4.5 6l-2 3.5L4 11v2l-1.5 1.5 2 3.5 2.2-.2 1.7 1L9 21h4l.6-2.2 1.7-1 2.2.2 2-3.5L18 13v-2l1.5-1.5-2-3.5-2.2.2-1.7-1L13 3H9Z" /><circle cx="11" cy="12" r="3" /></svg>
+            </button>
             <button class="notification-toggle" onClick={toggleNotifications} aria-pressed={notifications} aria-label={notifications ? "Disable mention notifications" : "Enable mention notifications"} title={notifications ? "Mention notifications on" : "Enable mention notifications"}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Zm5 3h4" /></svg>
             </button>
@@ -524,6 +540,7 @@ function Chat({ initial, onLogout }) {
           </div>
         </div>
       </aside>
+      {settingsOpen && <Settings fonts={fonts} onChange={setFonts} onClose={() => setSettingsOpen(false)} />}
       {menu && (
         <button
           class="scrim"
@@ -567,12 +584,12 @@ function Chat({ initial, onLogout }) {
         <div class="composer-area">
           <div class="composer-resize" role="separator" tabIndex={0}
             aria-label="Resize message input" aria-orientation="horizontal"
-            aria-valuemin={24} aria-valuemax={Math.floor(Math.min(240, window.innerHeight * 0.4))} aria-valuenow={composerHeight}
+            aria-valuemin={minimumComposerHeight} aria-valuemax={Math.floor(Math.min(240, window.innerHeight * 0.4))} aria-valuenow={actualComposerHeight}
             onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} onLostPointerCapture={endResize}
             onKeyDown={(event) => {
               if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
                 event.preventDefault();
-                resizeComposer(event.key === "Home" ? 24 : event.key === "End" ? 240 : composerHeight + (event.key === "ArrowUp" ? 16 : -16));
+                resizeComposer(event.key === "Home" ? minimumComposerHeight : event.key === "End" ? 240 : actualComposerHeight + (event.key === "ArrowUp" ? 16 : -16));
               }
             }}><span /></div>
           {hints.length > 0 && (
@@ -613,7 +630,7 @@ function Chat({ initial, onLogout }) {
               ref={input}
               dir="auto"
               rows={1}
-              style={{ height: `${composerHeight}px` }}
+              style={{ height: `${actualComposerHeight}px` }}
               aria-label="Message or command"
               aria-autocomplete="list"
               aria-controls={hints.length ? "command-hints" : undefined}
@@ -638,6 +655,21 @@ function Chat({ initial, onLogout }) {
       </main>
     </div>
   );
+}
+function Settings({fonts, onChange, onClose}) {
+  const dialog = useRef(null);
+  useEffect(() => {
+    const element = dialog.current;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  return <dialog class="settings-dialog" ref={dialog} aria-labelledby="settings-title" onCancel={event => {event.preventDefault();onClose();}}>
+    <header class="settings-heading"><h2 id="settings-title">Settings</h2><button class="settings-close" aria-label="Close settings" onClick={onClose}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></header>
+    <div class="font-setting"><label for="chat-font-size">Chat font size</label><output for="chat-font-size">{fonts.chat}px</output><input id="chat-font-size" type="range" min="14" max="24" step="1" value={fonts.chat} onInput={event => onChange({...fonts,chat:Number(event.currentTarget.value)})} /></div>
+    <div class="font-setting"><label for="ui-font-size">UI font size</label><output for="ui-font-size">{fonts.ui}px</output><input id="ui-font-size" type="range" min="12" max="18" step="1" value={fonts.ui} onInput={event => onChange({...fonts,ui:Number(event.currentTarget.value)})} /></div>
+    <p class="font-preview">The quick brown fox · 你好 · مرحبا 👋</p>
+    <button class="settings-reset" onClick={() => onChange({...defaultFonts})}>Reset defaults</button>
+  </dialog>;
 }
 
 function ConsoleOutput({ entry }) {

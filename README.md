@@ -95,6 +95,14 @@ Notifications are not push delivery to a closed browser/tab, and browser/OS
 notification settings can block them. Private message previews can appear in
 system notifications only after you opt in.
 
+The Settings button beside your profile adjusts chat text (14–24px) and UI
+text (12–18px) independently, with a live preview and Reset defaults. These
+preferences stay in this browser; they do not change the server configuration.
+Room and private-chat lists share a scrollable sidebar area; the profile stays
+fixed below it. Joined rooms and private peers come from the server on login,
+socket reconnect and when the page returns to the foreground. An older HTTP
+refresh cannot overwrite a newer WebSocket snapshot.
+
 
 | Command | Who | Behavior |
 | --- | --- | --- |
@@ -414,11 +422,14 @@ share the data folder. Replacing the frontend requires rebuilding the binary.
 Verified on October 8, 2026:
 
 - Rust formatting passes, and all 27 unit tests pass.
-- All 10 frontend tests pass, including timezone, mentions and notification deduplication.
+- All 15 frontend tests pass, including timezone, mentions, notification deduplication,
+  saved font preferences and invalid browser storage,
+  and resuming a stale conversation list without overwriting newer socket updates.
 - Clippy passes for all targets with warnings denied.
 - Web production build and Rust debug/release builds pass.
 - HTTP/WebSocket integration tests pass, including data-folder migration and
-  room/private reactions and replies, mention metadata, and production security checks.
+  room/private reactions and replies, mention metadata, second-device login/reconnect
+  directories, and production security checks.
 - Browser checks pass for login, room creation and selection, message delivery,
   desktop layout, and the mobile navigation drawer. No browser warnings or
   errors were observed during these checks.
