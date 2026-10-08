@@ -5,10 +5,10 @@ alwaysApply: true
 
 # 待用户提供的信息（每次回答末尾都要逐条询问，直到用户给出）
 
-- [~] 服务器环境：与同学的 ZihaoFU245/CommonRoom 同一台服务器。该项目是 Rust 单文件程序监听 127.0.0.1:3000，前面用 Nginx（HTTPS，location `/commonroom/`）或 Cloudflare Tunnel 转发，看起来是 Linux，没用 Docker，服务器上不一定装了 Node。还需确认：实际用 Nginx 还是 Cloudflare Tunnel、服务器有没有 Node.js、能不能用 3001 端口
+- [x] 开发方式：复制 ZihaoFU245/CommonRoom（Rust + Axum 后端，Preact 前端，SQLite，GPL-3.0）到本仓库再改；remote `upstream` 指向原仓库
+- [~] 服务器环境：与同学的 CommonRoom 同一台服务器，线上 https://cr.zihaofu245.me/chat/。链路已查明：Cloudflare（代理）→ Nginx → Rust 程序（127.0.0.1:3000）。服务器上不需要 Node。注意 Nginx 目前把 `/chatroom` 308 跳转到 `/chat/`，部署前要让同学改掉。还需确认：同学是否同意再跑一个实例并加一段 Nginx 配置（端口如 3001，`client_max_body_size` 需放大到约 12m）
 - [x] 通行密码：已写入 `.env` 的 `GATE_PASSWORD`
-- [x] 管理员身份：用户本人永远是最高管理员（站长）
-- [ ] 站长在聊天室里用的名字（用来确定谁是站长）
+- [x] 管理员身份：用户本人永远是最高管理员（站长），站长名字 `incyan`
 - [x] 网站名字：Chatroom（GitHub 仓库 InCyan16/chatroom，公开）
 
 用户提供后，把对应条目改成 [x] 并写上答案。例外：仓库是公开的，通行密码只能写进不提交的 `.env`，这里只标 [x]，绝不写出密码本身。
