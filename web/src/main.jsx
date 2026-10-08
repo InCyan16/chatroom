@@ -1,0 +1,628 @@
+import { render } from "preact";
+import { useEffect, useRef, useState, useMemo } from "preact/hooks";
+import "./style.css";
+import { ingest, timeline, suggestions, privatePeers, privateMessages, redactCommand, helpSections } from "./console.js";
+
+if (import.meta.env.PROD && location.protocol !== "https:") {
+  location.replace(
+    `https://${location.host}${location.pathname}${location.search}${location.hash}`,
+  );
+} else {
+  render(<App />, document.getElementById("app"));
+}
+
+async function api(path, body) {
+  const response = await fetch(new URL(`api/${path}`, document.baseURI), {
+    method: body === undefined ? "GET" : "POST",
+    credentials: "same-origin",
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+  });
+  const value = await response.json();
+  if (!response.ok)
+    throw new Error(value.error || "Something went wrong. Please try again.");
+  return value;
+}
+
+function App() {
+  const [account, setAccount] = useState(undefined);
+  const [initialError, setInitialError] = useState("");
+  useEffect(() => {
+    api("me")
+      .then(setAccount)
+      .catch((error) => {
+        if (
+          error.message !== "Please log in." &&
+          error.message !== "Account unavailable."
+        )
+          setInitialError(error.message);
+        setAccount(null);
+      });
+  }, []);
+  if (account === undefined)
+    return <div class="loading">Opening Commonroom…</div>;
+  return account ? (
+    <Chat initial={account} onLogout={() => setAccount(null)} />
+  ) : (
+    <Login initialError={initialError} onLogin={setAccount} />
+  );
+}
+
+function Brand() {
+  return (
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 36 36" fill="none" aria-hidden="true">
+        <path d="M28 7H8v22h20v-6" />
+        <path d="M15 12h15v9H19l-4 4V12Z" />
+        <path d="M20 16.5h5" />
+      </svg>
+      <span>CommonRoom</span>
+    </div>
+  );
+}
+
+function Login({ onLogin, initialError }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api("login", { username, password });
+      onLogin(await api("me"));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <main class="login-page">
+      <div class="login-top">
+        <Brand />
+      </div>
+      <section class="login-card">
+        <h1>Sign in.</h1>
+        <form onSubmit={submit}>
+          <label for="username">Username</label>
+          <input
+            id="username"
+            autoComplete="username"
+            autoFocus
+            maxLength={32}
+            value={username}
+            onInput={(e) => setUsername(e.currentTarget.value)}
+            required
+            placeholder="Your username"
+          />
+          <label for="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            maxLength={128}
+            value={password}
+            onInput={(e) => setPassword(e.currentTarget.value)}
+            required
+            placeholder="Your password"
+          />
+          {error && (
+            <div class="form-error" role="alert">
+              {error}
+            </div>
+          )}
+          <button class="primary" disabled={busy}>
+            {busy ? "Signing in…" : "Sign in"}
+            <span aria-hidden="true">↗</span>
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function Chat({ initial, onLogout }) {
+  const [state, setState] = useState(initial);
+  const currentState = useRef(initial);
+  const [selected, setSelected] = useState(() => {
+    const requested = new URLSearchParams(location.hash.slice(1)).get("room");
+    return (requested?.startsWith("@direct:") && privatePeers(initial).includes(requested.slice(8))) || (requested === "@command" && initial.admin) ||
+      initial.rooms.some((room) => room.name === requested)
+      ? requested
+      : initial.admin ? "@command" : initial.rooms[0]?.name || "@direct";
+  });
+  const [status, setStatus] = useState("connecting");
+  const [draft, setDraft] = useState("");
+  const [output, setOutput] = useState([]);
+  const [cleared, setCleared] = useState({});
+  const [pending, setPending] = useState(false);
+  const [menu, setMenu] = useState(() => window.matchMedia("(min-width: 701px)").matches);
+  const [composerHeight, setComposerHeight] = useState(24);
+  const resizeStart = useRef(null);
+  const menuButton = useRef(null);
+  function closeMenu() {
+    setMenu(false);
+    menuButton.current?.focus();
+  }
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event) => { if (event.key === "Escape") closeMenu(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [menu]);
+  function resizeComposer(height) {
+    setComposerHeight(Math.max(24, Math.min(240, window.innerHeight * 0.4, height)));
+  }
+  function startResize(event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizeStart.current = { y: event.clientY, height: input.current.clientHeight };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function moveResize(event) {
+    if (resizeStart.current) resizeComposer(resizeStart.current.height + resizeStart.current.y - event.clientY);
+  }
+  function endResize() { resizeStart.current = null; }
+  const [hintIndex, setHintIndex] = useState(0);
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const ledger = useRef(null);
+  if (!ledger.current) ledger.current = ingest(initial);
+  const socket = useRef(null);
+  const request = useRef(null);
+  const serial = useRef(0);
+  const desiredRoom = useRef(null);
+  const end = useRef(null);
+  const input = useRef(null);
+  const room = state.rooms.find((r) => r.name === selected);
+  const peers = useMemo(() => privatePeers(state), [state.private_peers, state.direct, state.username]);
+  const direct = selected === "@direct" || selected.startsWith("@direct:");
+  const peer = selected.startsWith("@direct:") ? selected.slice(8) : null;
+  const consoleView = selected === "@command";
+  const messages = useMemo(() => direct ? privateMessages(state.direct, state.username, peer) : room?.messages || [], [direct, peer, state.direct, state.username, room?.messages]);
+  const entries = useMemo(() => timeline(messages, output, ledger.current, cleared[selected] || 0, selected), [messages, output, cleared, selected]);
+  const renderedEntries = useMemo(() => entries.map((entry) => entry.kind === "message" ? <ConsoleMessage key={entry.key} message={entry.message} self={state.username} /> : <ConsoleOutput key={entry.key} entry={entry} />), [entries, state.username]);
+  const hints =
+    hintDismissed || pending
+      ? []
+      : suggestions(
+          draft,
+          state.commands || [],
+          state.users,
+          state.available_rooms || state.rooms.map((r) => r.name),
+        ).slice(0, 6);
+  const activeHint = Math.min(hintIndex, Math.max(0, hints.length - 1));
+
+  function append(command, result = null, error = false, view = selected) {
+    command = redactCommand(command);
+    const order = ++ledger.current.sequence;
+    const entry = {
+      kind: "command",
+      key: `local-${order}`,
+      order,
+      command,
+      result,
+      error,
+      room: view,
+    };
+    setOutput((previous) => [...previous, entry].slice(-200));
+    return entry.key;
+  }
+  function complete(key, result, error = false) {
+    setOutput((previous) =>
+      previous.map((entry) =>
+        entry.key === key ? { ...entry, result, error } : entry,
+      ),
+    );
+  }
+
+  useEffect(() => {
+    let stopped = false;
+    let retry;
+    let attempts = 0;
+    async function connect() {
+      if (stopped) return;
+      setStatus("connecting");
+      const url = new URL("ws", document.baseURI);
+      url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(url);
+      socket.current = ws;
+      ws.onopen = () => {
+        attempts = 0;
+        setStatus("online");
+      };
+      ws.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (data.kind === "snapshot") {
+          ingest(data, ledger.current);
+          currentState.current = data;
+          setState(data);
+          if (
+            desiredRoom.current &&
+            data.rooms.some((r) => r.name === desiredRoom.current)
+          ) {
+            setSelected(desiredRoom.current);
+            desiredRoom.current = null;
+          }
+        } else if (["notice", "error"].includes(data.kind)) {
+          const current = request.current;
+          if (!current || data.id !== current.id) return;
+          request.current = null;
+          setPending(false);
+          const error = data.kind === "error";
+          if (current.key) complete(current.key, data.text || "Done.", error);
+          else if (error) append(current.text, data.text, true, current.room);
+          if (!error) {
+            setDraft("");
+            const [command, target] = current.text.trim().split(/\s+/);
+            if (["/new", "/join"].includes(command) && target) {
+              desiredRoom.current = target;
+              if (currentState.current.rooms.some((room) => room.name === target)) {
+                setSelected(target);
+                desiredRoom.current = null;
+              }
+            }
+            if (command === "/tell" && target) setSelected(`@direct:${target}`);
+          }
+        }
+      };
+      ws.onclose = async () => {
+        if (stopped) return;
+        setStatus("offline");
+        if (request.current) {
+          const current = request.current;
+          const error =
+            "Connection lost before confirmation. Check history before sending again.";
+          if (current.key) complete(current.key, error, true);
+          else append(current.text, error, true, current.room);
+          request.current = null;
+          setPending(false);
+        }
+        try {
+          await api("me");
+          if (!stopped)
+            retry = setTimeout(
+              connect,
+              Math.min(1000 * 2 ** attempts++, 15000),
+            );
+        } catch (error) {
+          if (
+            ["Please log in.", "Account unavailable."].includes(error.message)
+          )
+            onLogout();
+          else if (!stopped) retry = setTimeout(connect, 5000);
+        }
+      };
+      ws.onerror = () => ws.close();
+    }
+    connect();
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      socket.current?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!direct && !(consoleView && state.admin) && !state.rooms.some((r) => r.name === selected))
+      setSelected(state.admin ? "@command" : state.rooms[0]?.name || "@direct");
+  }, [state.rooms, state.admin, selected]);
+  useEffect(() => {
+    history.replaceState(null, "", `#room=${encodeURIComponent(selected)}`);
+  }, [selected]);
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [messages.at(-1)?.id, selected, output, cleared]);
+  useEffect(() => {
+    if (!pending) input.current?.focus();
+  }, [pending]);
+
+  async function logout() {
+    try {
+      await api("logout", {});
+      onLogout();
+    } catch (error) {
+      append("/logout", error.message, true);
+    }
+  }
+  function choose(name) {
+    setSelected(name);
+    if (window.matchMedia("(max-width: 700px)").matches) setMenu(false);
+    input.current?.focus();
+  }
+  function edit(value) {
+    setDraft(value);
+    setHintIndex(0);
+    setHintDismissed(false);
+  }
+  function acceptHint(hint) {
+    if (!hint?.value) return;
+    edit(hint.value);
+    input.current?.focus();
+  }
+  function send(event) {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || pending) return;
+    if (!text.startsWith("/") && Array.from(text).length > 4000) {
+      append(text, "Messages support at most 4000 characters.", true);
+      return;
+    }
+    if (text === "/clear") {
+      setOutput((previous) => previous.filter((entry) => entry.room !== selected));
+      setCleared((previous) => ({...previous, [selected]: ledger.current.sequence}));
+      setDraft("");
+      return;
+    }
+    if (text === "/logout") {
+      logout();
+      return;
+    }
+    if (socket.current?.readyState !== WebSocket.OPEN) {
+      append(text, "Disconnected. Wait for the connection to recover.", true);
+      return;
+    }
+    if (direct && !peer && !text.startsWith("/")) {
+      append(text, "Use /tell user message for private messages.", true);
+      return;
+    }
+    if (consoleView && !text.startsWith("/")) {
+      append(text, "Use a command or select a room to send a message.", true);
+      return;
+    }
+    const id = ++serial.current;
+    request.current = {
+      id,
+      text,
+      room: selected,
+      key: text.startsWith("/") ? append(text) : null,
+    };
+    setPending(true);
+    setHintDismissed(true);
+    let wireText = peer && !text.startsWith("/") ? `/tell ${peer} ${text}` : draft;
+    if (peer && /^\/history(?:\s+\d+)?$/.test(text))
+      wireText = `${text === "/history" ? "/history 50" : text} ${peer}`;
+    socket.current.send(
+      JSON.stringify({ id, room: direct || consoleView ? null : selected, text: wireText }),
+    );
+  }
+  function keydown(event) {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      setHintDismissed(true);
+      return;
+    }
+    if (hints.length && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+      setHintIndex(
+        (activeHint + (event.key === "ArrowDown" ? 1 : hints.length - 1)) %
+          hints.length,
+      );
+      return;
+    }
+    if (event.key === "Tab" && hints[activeHint]?.value) {
+      event.preventDefault();
+      acceptHint(hints[activeHint]);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      send(event);
+    }
+  }
+  return (
+    <div class="chat-layout">
+      <aside id="navigation" class={`sidebar ${menu ? "visible" : ""}`}>
+        <div class="sidebar-heading">
+          <Brand />
+          <button class="sidebar-close" aria-label="Close navigation" onClick={closeMenu}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <nav class="navigation" aria-label="Conversations">
+          {state.admin && <button class={`room-link command-link ${consoleView ? "selected" : ""}`} onClick={() => choose("@command")}><span class="hash">&gt;</span>Command</button>}
+          <details class="nav-group" open>
+            <summary>Rooms<span class="group-count">{state.rooms.length}</span></summary>
+            <div class="nav-items">
+              {state.rooms.map((r) => <button key={r.name} class={`room-link ${selected === r.name ? "selected" : ""}`} onClick={() => choose(r.name)}><span class="hash">#</span>{r.name}<span class="room-count">{r.members.length}</span></button>)}
+              {!state.rooms.length && <p class="no-rooms">No rooms</p>}
+            </div>
+          </details>
+          <details class="nav-group" open>
+            <summary>Private messages<span class="group-count">{peers.length}</span></summary>
+            <div class="nav-items">
+              {peers.map((name) => <button key={name} class={`room-link ${peer === name ? "selected" : ""}`} onClick={() => choose(`@direct:${name}`)}><span class="hash">↗</span>{name}</button>)}
+              {!peers.length && <p class="no-rooms">No conversations</p>}
+            </div>
+          </details>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="profile">
+            <div class="profile-name">
+              <strong>{state.username}</strong>
+              <small>{state.admin ? "admin" : "user"}</small>
+            </div>
+            <button
+              class="signout"
+              onClick={logout}
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5M9 12h11m-4-4 4 4-4 4" /></svg>
+            </button>
+          </div>
+        </div>
+      </aside>
+      {menu && (
+        <button
+          class="scrim"
+          aria-label="Close navigation"
+          onClick={closeMenu}
+        />
+      )}
+      <main class="conversation">
+        <header class="chat-header">
+          <button
+            class="mobile-menu"
+            ref={menuButton}
+            aria-label={menu ? "Close navigation" : "Open navigation"}
+            aria-expanded={menu}
+            aria-controls="navigation"
+            onClick={() => menu ? closeMenu() : setMenu(true)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14" /></svg>
+          </button>
+          <div class="room-title">
+            <span>{consoleView ? ">" : direct ? "↗" : "#"}</span>
+            <h1>{consoleView ? "Command" : direct ? peer || "Private messages" : selected}</h1>
+          </div>
+          <span class={`connection ${status}`}>
+            <i />
+            {status === "online"
+              ? "Connected"
+              : status === "connecting"
+                ? "Connecting"
+                : "Reconnecting"}
+          </span>
+        </header>
+        <section
+          class="message-list console-history"
+          aria-label="Conversation history"
+          aria-live="polite"
+        >
+          {renderedEntries}
+          <div ref={end} />
+        </section>
+        <div class="composer-area">
+          <div class="composer-resize" role="separator" tabIndex={0}
+            aria-label="Resize message input" aria-orientation="horizontal"
+            aria-valuemin={24} aria-valuemax={Math.floor(Math.min(240, window.innerHeight * 0.4))} aria-valuenow={composerHeight}
+            onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} onLostPointerCapture={endResize}
+            onKeyDown={(event) => {
+              if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                event.preventDefault();
+                resizeComposer(event.key === "Home" ? 24 : event.key === "End" ? 240 : composerHeight + (event.key === "ArrowUp" ? 16 : -16));
+              }
+            }}><span /></div>
+          {hints.length > 0 && (
+            <ul
+              class="command-hints"
+              id="command-hints"
+              role="listbox"
+              aria-label="Command suggestions"
+            >
+              {hints.map((hint, index) => (
+                <li
+                  id={`hint-${index}`}
+                  key={hint.label}
+                  role="option"
+                  aria-selected={index === activeHint}
+                >
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    class={index === activeHint ? "active" : ""}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => acceptHint(hint)}
+                    disabled={!hint.value}
+                  >
+                    <code>{hint.label}</code>
+                    <span>{hint.description}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form class="composer" onSubmit={send}>
+            <span class="prompt" aria-hidden="true">
+              ›
+            </span>
+            <textarea
+              ref={input}
+              dir="auto"
+              rows={1}
+              style={{ height: `${composerHeight}px` }}
+              aria-label="Message or command"
+              aria-autocomplete="list"
+              aria-controls={hints.length ? "command-hints" : undefined}
+              aria-activedescendant={
+                hints.length ? `hint-${activeHint}` : undefined
+              }
+              placeholder={consoleView ? "Command" : "Message or command"}
+              value={draft}
+              disabled={pending}
+              onInput={(event) => edit(event.currentTarget.value)}
+              onKeyDown={keydown}
+            />
+            <button
+              class="send-button"
+              disabled={pending || !draft.trim()}
+              aria-label="Send message"
+            >
+              {pending ? "…" : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-6 6 6-6 6 6" /></svg>}
+            </button>
+          </form>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function ConsoleOutput({ entry }) {
+  const help = entry.command === "/help" && !entry.error && entry.result;
+  return (
+    <article
+      class={`console-output ${entry.error ? "error" : ""}`}
+      data-local-output="true"
+    >
+      <div class="console-input">
+        <span aria-hidden="true">›</span>
+        <code>{entry.command}</code>
+      </div>
+      {help ? (
+        <div class="help-sections">
+          {helpSections(entry.result).map((group) => <section key={group.title}>
+            <h2>{group.title}</h2>
+            <ul class="help-list" aria-label={`${group.title} commands`}>
+              {group.commands.map(({usage, description}) => <li key={usage}><code>{usage}</code><span>{description}</span></li>)}
+            </ul>
+          </section>)}
+        </div>
+      ) : (
+        <pre>{entry.result ?? "…"}</pre>
+      )}
+    </article>
+  );
+}
+function ConsoleMessage({ message, self }) {
+  return (
+    <article class={`console-message ${message.from === self ? "own" : ""}`}>
+      <time
+        dateTime={new Date(message.time * 1000).toISOString()}
+        title={new Date(message.time * 1000).toLocaleString()}
+      >
+        {new Date(message.time * 1000).toLocaleTimeString(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        })}
+      </time>
+      <strong>
+        {message.from}
+
+      </strong>
+      <p dir="auto">{message.text}</p>
+    </article>
+  );
+}

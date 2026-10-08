@@ -1,0 +1,10 @@
+/target/
+/web/node_modules/
+/web/dist/
+/web/dist-debug/
+/data/
+/chat
+*.sqlite*
+.DS_Store
+.env
+/.pnpm-store/

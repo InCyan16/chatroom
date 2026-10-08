@@ -1,0 +1,21 @@
+{
+  "name": "chatroom-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:integration": "node scripts/smoke.mjs",
+    "test": "node --test src/console.test.js"
+  },
+  "dependencies": {
+    "preact": "^10.27.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0",
+    "@preact/preset-vite": "^2.10.2",
+    "ws": "^8.18.0"
+  }
+}
