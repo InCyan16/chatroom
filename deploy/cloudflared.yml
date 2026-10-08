@@ -1,0 +1,9 @@
+# For a locally managed tunnel. Replace the ID, hostname, and credential path.
+# For a dashboard-managed tunnel, set the service to http://127.0.0.1:3000.
+tunnel: YOUR-TUNNEL-ID
+credentials-file: /absolute/path/to/YOUR-TUNNEL-ID.json
+
+ingress:
+  - hostname: chat.example.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
